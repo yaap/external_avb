@@ -47,6 +47,7 @@ AVB_FOOTER_VERSION_MAJOR = 1
 AVB_FOOTER_VERSION_MINOR = 0
 
 AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED = 1
+AVB_VBMETA_IMAGE_FLAGS_VERIFICATION_DISABLED = 2
 
 # Configuration for enabling logging of calls to avbtool.
 AVB_INVOCATION_LOGFILE = os.environ.get('AVB_INVOCATION_LOGFILE')
@@ -2423,13 +2424,14 @@ class Avb(object):
     misc_image.seek(self.AB_MISC_METADATA_OFFSET)
     misc_image.write(ab_data)
 
-  def info_image(self, image_filename, output, cert):
+  def info_image(self, image_filename, output, cert, output_pubkey=None):
     """Implements the 'info_image' command.
 
     Arguments:
       image_filename: Image file to get information from (file object).
       output: Output file to write human-readable information to (file object).
       cert: If True, show information about the avb_cert certificates.
+      output_pubkey: Optional file to write the public key to (file object).
     """
     image = ImageHandler(image_filename, read_only=True)
     o = output
@@ -2466,6 +2468,9 @@ class Avb(object):
     if key_blob:
       hexdig = hashlib.sha1(key_blob).hexdigest()
       o.write('Public key (sha1):        {}\n'.format(hexdig))
+      if output_pubkey is not None:
+        output_pubkey.write(key_blob)
+
     o.write('Algorithm:                {}\n'.format(alg_name))
     o.write('Rollback Index:           {}\n'.format(header.rollback_index))
     o.write('Flags:                    {}\n'.format(header.flags))
@@ -3280,6 +3285,20 @@ class Avb(object):
     """
     output.write(RSAPublicKey(key_path).encode())
 
+  def extract_public_key_digest(self, key_path, output):
+    """Implements the 'extract_public_key_digest' command.
+
+    Arguments:
+      key_path: The path to a RSA private key file.
+      output: The file to write to.
+
+    Raises:
+      AvbError: If the public key could not be extracted.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(RSAPublicKey(key_path).encode())
+    output.write(hasher.hexdigest())
+
   def append_vbmeta_image(self, image_filename, vbmeta_image_filename,
                           partition_size):
     """Implementation of the append_vbmeta_image command.
@@ -3584,13 +3603,13 @@ class Avb(object):
       image.truncate(original_image_size)
       raise AvbError('Adding hash_footer failed: {}.'.format(e)) from e
 
-  def add_hashtree_footer(self, image_filename, partition_size, partition_name,
+  def add_hashtree_footer(self, image_filename, partition_size: int, partition_name,
                           generate_fec, fec_num_roots, hash_algorithm,
                           block_size, salt, chain_partitions_use_ab,
                           chain_partitions_do_not_use_ab,
                           algorithm_name, key_path,
                           public_key_metadata_path, rollback_index, flags,
-                          rollback_index_location,
+                          rollback_index_location: int,
                           props, props_from_file, kernel_cmdlines,
                           setup_rootfs_from_kernel,
                           setup_as_rootfs_from_kernel,
@@ -4294,6 +4313,9 @@ class AvbTool(object):
     sub_parser.add_argument('--set_hashtree_disabled_flag',
                             help='Set the HASHTREE_DISABLED flag',
                             action='store_true')
+    sub_parser.add_argument('--set_verification_disabled_flag',
+                            help='Set the VERIFICATION_DISABLED flag',
+                            action='store_true')
 
   def _add_common_footer_args(self, sub_parser):
     """Adds arguments used by add_*_footer sub-commands.
@@ -4325,6 +4347,8 @@ class AvbTool(object):
     """
     if args.set_hashtree_disabled_flag:
       args.flags |= AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED
+    if args.set_verification_disabled_flag:
+      args.flags |= AVB_VBMETA_IMAGE_FLAGS_VERIFICATION_DISABLED
     return args
 
   def run(self, argv):
@@ -4368,6 +4392,17 @@ class AvbTool(object):
                             type=argparse.FileType('wb'),
                             required=True)
     sub_parser.set_defaults(func=self.extract_public_key)
+
+    sub_parser = subparsers.add_parser('extract_public_key_digest',
+                                       help='Extract SHA-256 digest of public key.')
+    sub_parser.add_argument('--key',
+                            help='Path to RSA private key file',
+                            required=True)
+    sub_parser.add_argument('--output',
+                            help='Output file name',
+                            type=argparse.FileType('w', encoding='UTF-8'),
+                            required=True)
+    sub_parser.set_defaults(func=self.extract_public_key_digest)
 
     sub_parser = subparsers.add_parser('make_vbmeta_image',
                                        help='Makes a vbmeta image.')
@@ -4570,6 +4605,10 @@ class AvbTool(object):
                             help=('Show information about the avb_cert '
                                   'extension certificate.'),
                             action='store_true')
+    sub_parser.add_argument('--output_pubkey',
+                            help='Write public key to file',
+                            type=argparse.FileType('wb'),
+                            required=False)
     sub_parser.set_defaults(func=self.info_image)
 
     sub_parser = subparsers.add_parser(
@@ -4815,6 +4854,10 @@ class AvbTool(object):
     """Implements the 'extract_public_key' sub-command."""
     self.avb.extract_public_key(args.key, args.output)
 
+  def extract_public_key_digest(self, args):
+    """Implements the 'extract_public_key_digest' sub-command."""
+    self.avb.extract_public_key_digest(args.key, args.output)
+
   def make_vbmeta_image(self, args):
     """Implements the 'make_vbmeta_image' sub-command."""
     args = self._fixup_common_args(args)
@@ -4937,7 +4980,8 @@ Please use '--hash_algorithm sha256'.
 
   def info_image(self, args):
     """Implements the 'info_image' sub-command."""
-    self.avb.info_image(args.image.name, args.output, args.cert)
+    self.avb.info_image(args.image.name, args.output,
+                        args.cert, args.output_pubkey)
 
   def verify_image(self, args):
     """Implements the 'verify_image' sub-command."""
