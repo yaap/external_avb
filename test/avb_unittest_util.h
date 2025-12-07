@@ -35,6 +35,9 @@
 // Encodes |len| bytes of |data| as a lower-case hex-string.
 std::string mem_to_hexstring(const uint8_t* data, size_t len);
 
+// Encodes the bytes contained in |data| as a lower-case hex-string.
+std::string mem_to_hexstring(const std::vector<uint8_t>& data);
+
 // Trims whitespace from start and end of |str|.
 std::string string_trim(const std::string& str);
 
@@ -69,6 +72,10 @@ class BaseAvbToolTest : public ::testing::Test {
   std::string CalcVBMetaDigest(const std::string& vbmeta_image,
                                const std::string& digest_alg);
 
+  /* Similar to CalcVBMetaDigest but uses '--format raw'. */
+  std::vector<uint8_t> CalcVBMetaDigestRaw(const std::string& vbmeta_image,
+                                           const std::string& digest_alg);
+
   /* Generates a vbmeta image, using avbtoool, with file name
    * |image_name|. The generated vbmeta image will written to disk,
    * see the |vbmeta_image_path_| variable for its path and
@@ -97,6 +104,11 @@ class BaseAvbToolTest : public ::testing::Test {
    * format for a .pem key.
    */
   std::string PublicKeyAVBDigest(const std::string& key_path);
+
+  /* Runs diff -u on two strings and compares to expected output. */
+  void EXPECT_DIFF(const std::string& text1,
+                   const std::string& text2,
+                   const std::string& expected_diff);
 
   void SetUp() override;
   void TearDown() override;

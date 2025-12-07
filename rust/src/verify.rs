@@ -20,23 +20,26 @@
 extern crate alloc;
 
 use crate::{
-    descriptor::{get_descriptors, Descriptor, DescriptorResult},
+    Ops,
+    descriptor::{Descriptor, DescriptorResult, get_descriptors},
     error::{
-        slot_verify_enum_to_result, vbmeta_verify_enum_to_result, SlotVerifyError,
-        SlotVerifyNoDataResult, SlotVerifyResult, VbmetaVerifyResult,
+        SlotVerifyError, SlotVerifyNoDataResult, SlotVerifyResult, VbmetaVerifyResult,
+        slot_verify_enum_to_result, vbmeta_verify_enum_to_result,
     },
-    ops, Ops,
+    ops,
 };
 use alloc::vec::Vec;
 use avb_bindgen::{
-    avb_slot_verify, avb_slot_verify_data_free, AvbPartitionData, AvbSlotVerifyData, AvbVBMetaData,
+    AVB_SHA256_DIGEST_SIZE, AVB_SHA512_DIGEST_SIZE, AvbDigestType, AvbPartitionData,
+    AvbSlotVerifyData, AvbVBMetaData, avb_slot_verify,
+    avb_slot_verify_data_calculate_vbmeta_digest, avb_slot_verify_data_free,
 };
 use core::{
-    ffi::{c_char, CStr},
+    ffi::{CStr, c_char},
     fmt,
     marker::PhantomData,
     pin::pin,
-    ptr::{self, null, null_mut, NonNull},
+    ptr::{self, NonNull, null, null_mut},
     slice,
 };
 
@@ -101,6 +104,7 @@ impl VbmetaData {
     /// Extracts the descriptors from the vbmeta image.
     ///
     /// Note that this function allocates memory to hold the `Descriptor` objects.
+    /// TODO(b/437999882): get rid of the allocation or provide allocation-free counterpart.
     ///
     /// # Returns
     /// A vector of descriptors, or `DescriptorError` on failure.
@@ -110,15 +114,32 @@ impl VbmetaData {
         unsafe { get_descriptors(self) }
     }
 
-    /// Gets a property from the vbmeta image for the given key
+    /// Gets a property value from the vbmeta image for the given key
     ///
     /// This function re-implements the libavb avb_property_lookup logic.
+    ///
+    /// Note that this function allocates memory to hold all the `Descriptor` objects.
+    /// TODO(b/437999882): get rid of the allocation or provide allocation-free counterpart.
     ///
     /// # Returns
     /// Byte array with property data or None in case property not found or failure.
     pub fn get_property_value(&self, key: &str) -> Option<&[u8]> {
+        self.get_property_value_with_nul(key)
+            .map(|v| &v[..v.len() - 1])
+    }
+
+    /// Gets a nul terminated property value from the vbmeta image for the given key
+    ///
+    /// This function re-implements the libavb avb_property_lookup logic.
+    ///
+    /// Note that this function allocates memory to hold all the `Descriptor` objects.
+    /// TODO(b/437999882): get rid of the allocation or provide allocation-free counterpart.
+    ///
+    /// # Returns
+    /// Byte array with nul terminated property data or None in case property not found or failure.
+    pub fn get_property_value_with_nul(&self, key: &str) -> Option<&[u8]> {
         self.descriptors().ok()?.iter().find_map(|d| match d {
-            Descriptor::Property(p) if p.key == key => Some(p.value),
+            Descriptor::Property(p) if p.key == key => Some(p.value_with_nul),
             _ => None,
         })
     }
@@ -259,7 +280,7 @@ impl<'a> SlotVerifyData<'a> {
     /// # Arguments
     /// * `data`: a `AvbSlotVerifyData` object created by libavb using `ops`.
     /// * `ops`: the user-provided `Ops` object that was used for verification; only used here to
-    ///          grab the preloaded data lifetime.
+    ///   grab the preloaded data lifetime.
     ///
     /// # Returns
     /// The new object, or `Err(SlotVerifyError::Internal)` if the data looks invalid.
@@ -347,6 +368,41 @@ impl<'a> SlotVerifyData<'a> {
     pub fn resolved_hashtree_error_mode(&self) -> HashtreeErrorMode {
         // SAFETY: `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
         unsafe { self.raw_data.as_ref() }.resolved_hashtree_error_mode
+    }
+
+    /// Calculates the SHA-256 digest of all vbmeta images in this `SlotVerifyData`.
+    pub fn calculate_sha256_digest(&self) -> [u8; 32] {
+        let mut digest = [0; AVB_SHA256_DIGEST_SIZE as usize];
+        // SAFETY:
+        // * `digest` is of size AVB_SHA256_DIGEST_SIZE, as needed by AVB_DIGEST_TYPE_SHA256.
+        unsafe { self.calculate_digest(AvbDigestType::AVB_DIGEST_TYPE_SHA256, &mut digest) };
+        digest
+    }
+
+    /// Calculates the SHA-512 digest of all vbmeta images in this `SlotVerifyData`.
+    pub fn calculate_sha512_digest(&self) -> [u8; 64] {
+        let mut digest = [0; AVB_SHA512_DIGEST_SIZE as usize];
+        // SAFETY:
+        // * `digest` is of size AVB_SHA512_DIGEST_SIZE, as needed by AVB_DIGEST_TYPE_SHA512.
+        unsafe { self.calculate_digest(AvbDigestType::AVB_DIGEST_TYPE_SHA512, &mut digest) };
+        digest
+    }
+
+    /// Calculates the requested digest of all vbmeta images in this `SlotVerifyData`.
+    ///
+    /// # Safety
+    /// * `out` must be large enough to hold a digest of the requested type.
+    unsafe fn calculate_digest(&self, digest_type: AvbDigestType, out: &mut [u8]) {
+        // SAFETY:
+        // * `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        // * `out` is mutable, owned by the caller who ensured it is large enough.
+        unsafe {
+            avb_slot_verify_data_calculate_vbmeta_digest(
+                self.raw_data.as_ptr(),
+                digest_type,
+                out.as_mut_ptr(),
+            )
+        };
     }
 }
 

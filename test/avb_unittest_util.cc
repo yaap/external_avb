@@ -36,6 +36,10 @@ std::string mem_to_hexstring(const uint8_t* data, size_t len) {
   return ret;
 }
 
+std::string mem_to_hexstring(const std::vector<uint8_t>& data) {
+  return mem_to_hexstring(data.data(), data.size());
+}
+
 std::string string_trim(const std::string& str) {
   size_t first = str.find_first_not_of(" \t\n");
   if (first == std::string::npos) {
@@ -87,6 +91,26 @@ std::string BaseAvbToolTest::CalcVBMetaDigest(const std::string& vbmeta_image,
   EXPECT_TRUE(android::base::ReadFileToString(vbmeta_digest_path.string(),
                                               &vbmeta_digest_data));
   return string_trim(vbmeta_digest_data);
+}
+
+std::vector<uint8_t> BaseAvbToolTest::CalcVBMetaDigestRaw(
+    const std::string& vbmeta_image, const std::string& digest_alg) {
+  std::filesystem::path vbmeta_path = testdir_ / vbmeta_image;
+  std::filesystem::path vbmeta_digest_path = testdir_ / "vbmeta_digest_raw";
+  EXPECT_COMMAND(
+      0,
+      "./avbtool.py calculate_vbmeta_digest --image %s --hash_algorithm %s"
+      " --output %s --format raw",
+      vbmeta_path.c_str(),
+      digest_alg.c_str(),
+      vbmeta_digest_path.c_str());
+
+  std::string vbmeta_digest_data;
+  EXPECT_TRUE(android::base::ReadFileToString(vbmeta_digest_path.string(),
+                                              &vbmeta_digest_data));
+  std::vector<uint8_t> digest{vbmeta_digest_data.begin(),
+                              vbmeta_digest_data.end()};
+  return digest;
 }
 
 void BaseAvbToolTest::GenerateVBMetaImage(
@@ -175,6 +199,44 @@ std::string BaseAvbToolTest::PublicKeyAVBDigest(const std::string& key_path) {
   std::string digest_data;
   EXPECT_TRUE(android::base::ReadFileToString(tmp_path.string(), &digest_data));
   return digest_data;
+}
+
+void BaseAvbToolTest::EXPECT_DIFF(const std::string& text1,
+                                  const std::string& text2,
+                                  const std::string& expected_diff) {
+  std::filesystem::path file1_path = testdir_ / "diff_file1.txt";
+  std::filesystem::path file2_path = testdir_ / "diff_file2.txt";
+  ASSERT_TRUE(android::base::WriteStringToFile(text1, file1_path.string()));
+  ASSERT_TRUE(android::base::WriteStringToFile(text2, file2_path.string()));
+
+  std::string cmd =
+      android::base::StringPrintf("diff -u --label original --label new %s %s",
+                                  file1_path.c_str(),
+                                  file2_path.c_str());
+
+  std::string actual_diff;
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (!pipe) {
+    FAIL() << "popen() failed for command: " << cmd;
+  }
+  char buffer[256];
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    actual_diff += buffer;
+  }
+  int status = pclose(pipe);
+  int exit_code = WEXITSTATUS(status);
+
+  if (expected_diff.empty()) {
+    EXPECT_EQ(0, exit_code) << "Expected no difference, but diff found one.";
+    EXPECT_EQ("", actual_diff);
+  } else {
+    EXPECT_EQ(1, exit_code)
+        << "Expected a difference, but diff found none or an error occurred.";
+    EXPECT_EQ(expected_diff, actual_diff)
+        << "The diff output did not match.\n"
+        << "---BEGIN ACTUAL DIFF---\n"
+        << actual_diff << "---END ACTUAL DIFF---";
+  }
 }
 
 }  // namespace avb
